@@ -2,7 +2,9 @@ use super::tables::{
     DELTA, DEVIATION_MAP, DEVIATIONS_A_G, DEVIATIONS_K_ZC, GRADE_MAP, LOWER_J,
     STANDARD_TOLERANCE_GRADES, UPPER_J,
 };
+use wasm_bindgen::prelude::*;
 
+#[wasm_bindgen]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tolerance {
     pub upper: f64,
@@ -11,11 +13,11 @@ pub struct Tolerance {
 }
 
 impl Tolerance {
-    fn from_limits(upper: f64, lower: f64) -> Self {
+    fn from_int(upper_nm: i32, lower_nm: i32) -> Self {
         Self {
-            upper,
-            middle: (upper + lower) / 2.0,
-            lower,
+            upper: nm_to_mm(upper_nm),
+            middle: nm_to_mm((upper_nm + lower_nm) / 2),
+            lower: nm_to_mm(lower_nm),
         }
     }
 }
@@ -86,21 +88,18 @@ pub fn limits(size: f64, tolerance_class: &str) -> Result<Tolerance, Error> {
         .position(|&g| g == grade)
         .ok_or_else(|| Error::InvalidToleranceClass(tolerance_class.to_owned()))?
         + 1;
-    let idx_dev = DEVIATION_MAP
-        .iter()
-        .position(|&d| d.eq_ignore_ascii_case(deviation))
-        .ok_or_else(|| Error::InvalidToleranceClass(tolerance_class.to_owned()))?
-        + 1;
     let idx_tol = STANDARD_TOLERANCE_GRADES
         .iter()
         .position(|&s| s[0] >= int_size)
         .ok_or(Error::SizeOutOfRange(size))?;
 
-    let tolerance = *STANDARD_TOLERANCE_GRADES[idx_tol]
+    // Tolerance grades are stored in 1/10 µm; convert to nanometres
+    // Sentinel -1 becomes -100
+    let tolerance_nm = *STANDARD_TOLERANCE_GRADES[idx_tol]
         .get(idx_grade)
         .ok_or(Error::SizeOutOfRange(size))?
         * 100;
-    if tolerance == -100 {
+    if tolerance_nm == -100 {
         return Err(Error::UnsupportedCombination {
             tolerance_class: tolerance_class.to_owned(),
             size,
@@ -108,9 +107,9 @@ pub fn limits(size: f64, tolerance_class: &str) -> Result<Tolerance, Error> {
     }
 
     let result = if hole {
-        lookup_hole(int_size, tolerance, idx_dev, idx_grade)
+        lookup_hole(int_size, tolerance_nm, deviation, idx_grade)
     } else {
-        lookup_shaft(int_size, tolerance, idx_dev, idx_grade)
+        lookup_shaft(int_size, tolerance_nm, deviation, idx_grade)
     };
 
     result.ok_or_else(|| Error::UnsupportedCombination {
@@ -119,115 +118,120 @@ pub fn limits(size: f64, tolerance_class: &str) -> Result<Tolerance, Error> {
     })
 }
 
-// Convert nanometre integer to millimetre float.
-fn flt(d: i32) -> f64 {
+// Convert nanometre integer to millimetre float (final step)
+fn nm_to_mm(d: i32) -> f64 {
     d as f64 / 1_000_000.0
 }
 
-// Retrieve lookup value, filtering sentinel -1, converting micrometre to nanometre.
-fn rtv(d: i32) -> Option<i32> {
-    if d != -1 { Some(d * 1000) } else { None }
+// Convert table micrometre value to nanometres, filtering sentinel -1
+fn um_to_nm(d: i32) -> Option<i32> {
+    if d != -1 { Some(d * 1_000) } else { None }
 }
 
-fn lookup_hole(size: i32, tol: i32, idx_dev: usize, idx_grade: usize) -> Option<Tolerance> {
-    if (0..11).contains(&idx_dev) {
-        // A to G
-        let idx_size = DEVIATIONS_A_G.iter().position(|&s| s[0] >= size)?;
-        let dev = rtv(*DEVIATIONS_A_G[idx_size].get(idx_dev)?)?;
-        if (idx_dev == 1 || idx_dev == 2) && size == 1 {
-            None
-        } else {
-            Some(Tolerance::from_limits(flt(dev + tol), flt(dev)))
-        }
-    } else if idx_dev == 11 {
-        // H
-        Some(Tolerance::from_limits(flt(tol), 0.0))
-    } else if idx_dev == 12 {
-        // JS
-        Some(Tolerance::from_limits(flt(tol / 2), -flt(tol / 2)))
-    } else if idx_dev == 13 && (8..11).contains(&idx_grade) {
-        // J
-        let idx_size = UPPER_J.iter().position(|&s| s[0] >= size)?;
-        let dev = rtv(*UPPER_J[idx_size].get(idx_grade - 7)?)?;
-        Some(Tolerance::from_limits(flt(dev), flt(dev - tol)))
-    } else if idx_dev == 14 {
-        // K
-        let idx_size = DEVIATIONS_K_ZC.iter().position(|&s| s[0] >= size)?;
-        let dev = -rtv(*DEVIATIONS_K_ZC[idx_size].get(idx_dev - 13)?)? + delta(size, idx_grade);
-        if idx_grade > 10 && size > 3 {
-            None
-        } else {
-            Some(Tolerance::from_limits(flt(dev), flt(dev - tol)))
-        }
-    } else if idx_dev == 15 {
-        // M
-        let idx_size = DEVIATIONS_K_ZC.iter().position(|&s| s[0] >= size)?;
-        let mut dev = -rtv(*DEVIATIONS_K_ZC[idx_size].get(idx_dev - 13)?)? + delta(size, idx_grade);
-        if idx_grade == 8 && size > 250 && size <= 315 {
-            dev += 2_000;
-        }
-        Some(Tolerance::from_limits(flt(dev), flt(dev - tol)))
-    } else if idx_dev == 16 {
-        // N
-        let idx_size = DEVIATIONS_K_ZC.iter().position(|&s| s[0] >= size)?;
-        let dev = -rtv(*DEVIATIONS_K_ZC[idx_size].get(idx_dev - 13)?)? + delta(size, idx_grade);
-        if (idx_grade > 10 && size > 500) || (idx_grade > 10 && size <= 1) {
-            None
-        } else {
-            Some(Tolerance::from_limits(flt(dev), flt(dev - tol)))
-        }
-    } else if (17..30).contains(&idx_dev) {
-        // P to ZC
-        let idx_size = DEVIATIONS_K_ZC.iter().position(|&s| s[0] >= size)?;
-        let dev = -rtv(*DEVIATIONS_K_ZC[idx_size].get(idx_dev - 13)?)?
-            + if idx_grade < 10 {
-                delta(size, idx_grade)
+// Column index in DEVIATIONS_A_G or DEVIATIONS_K_ZC for a given deviation letter.
+// +1 because column 0 is the size bracket.
+fn dev_col(deviation: &str) -> Option<usize> {
+    DEVIATION_MAP
+        .iter()
+        .position(|&d| d.eq_ignore_ascii_case(deviation))
+        .map(|i| i + 1)
+}
+
+fn lookup_hole(size: i32, tol: i32, deviation: &str, idx_grade: usize) -> Option<Tolerance> {
+    let col = dev_col(deviation)?;
+
+    match deviation {
+        "A" | "B" | "C" | "CD" | "D" | "E" | "EF" | "F" | "FG" | "G" => {
+            let row = DEVIATIONS_A_G.iter().position(|&s| s[0] >= size)?;
+            let dev = um_to_nm(*DEVIATIONS_A_G[row].get(col)?)?;
+            if matches!(deviation, "A" | "B") && size == 1 {
+                None
             } else {
-                0
-            };
-        Some(Tolerance::from_limits(flt(dev), flt(dev - tol)))
-    } else {
-        None
+                Some(Tolerance::from_int(dev + tol, dev))
+            }
+        }
+        "H" => Some(Tolerance::from_int(tol, 0)),
+        "JS" => Some(Tolerance::from_int(tol / 2, -(tol / 2))),
+        "J" if (8..11).contains(&idx_grade) => {
+            let row = UPPER_J.iter().position(|&s| s[0] >= size)?;
+            let dev = um_to_nm(*UPPER_J[row].get(idx_grade - 7)?)?;
+            Some(Tolerance::from_int(dev, dev - tol))
+        }
+        "K" => {
+            let row = DEVIATIONS_K_ZC.iter().position(|&s| s[0] >= size)?;
+            let dev = -um_to_nm(*DEVIATIONS_K_ZC[row].get(col - 13)?)? + delta(size, idx_grade);
+            if idx_grade > 10 && size > 3 {
+                None
+            } else {
+                Some(Tolerance::from_int(dev, dev - tol))
+            }
+        }
+        "M" => {
+            let row = DEVIATIONS_K_ZC.iter().position(|&s| s[0] >= size)?;
+            let mut dev = -um_to_nm(*DEVIATIONS_K_ZC[row].get(col - 13)?)? + delta(size, idx_grade);
+            if idx_grade == 8 && size > 250 && size <= 315 {
+                dev += 2_000;
+            }
+            Some(Tolerance::from_int(dev, dev - tol))
+        }
+        "N" => {
+            let row = DEVIATIONS_K_ZC.iter().position(|&s| s[0] >= size)?;
+            let dev = -um_to_nm(*DEVIATIONS_K_ZC[row].get(col - 13)?)? + delta(size, idx_grade);
+            if (idx_grade > 10 && size > 500) || (idx_grade > 10 && size <= 1) {
+                None
+            } else {
+                Some(Tolerance::from_int(dev, dev - tol))
+            }
+        }
+        "P" | "R" | "S" | "T" | "U" | "V" | "X" | "Y" | "Z" | "ZA" | "ZB" | "ZC" => {
+            let row = DEVIATIONS_K_ZC.iter().position(|&s| s[0] >= size)?;
+            let dev = -um_to_nm(*DEVIATIONS_K_ZC[row].get(col - 13)?)?
+                + if idx_grade < 10 {
+                    delta(size, idx_grade)
+                } else {
+                    0
+                };
+            Some(Tolerance::from_int(dev, dev - tol))
+        }
+        _ => None,
     }
 }
 
-fn lookup_shaft(size: i32, tol: i32, idx_dev: usize, idx_grade: usize) -> Option<Tolerance> {
-    if (0..11).contains(&idx_dev) {
-        // a to g
-        let idx_size = DEVIATIONS_A_G.iter().position(|&s| s[0] >= size)?;
-        let dev = -rtv(*DEVIATIONS_A_G[idx_size].get(idx_dev)?)?;
-        if dev == -1 || ((idx_dev == 1 || idx_dev == 2) && size == 1) {
-            None
-        } else {
-            Some(Tolerance::from_limits(flt(dev), flt(dev - tol)))
+fn lookup_shaft(size: i32, tol: i32, deviation: &str, idx_grade: usize) -> Option<Tolerance> {
+    let col = dev_col(deviation)?;
+
+    match deviation {
+        "a" | "b" | "c" | "cd" | "d" | "e" | "ef" | "f" | "fg" | "g" => {
+            let row = DEVIATIONS_A_G.iter().position(|&s| s[0] >= size)?;
+            let dev = -um_to_nm(*DEVIATIONS_A_G[row].get(col)?)?;
+            if matches!(deviation, "a" | "b") && size == 1 {
+                None
+            } else {
+                Some(Tolerance::from_int(dev, dev - tol))
+            }
         }
-    } else if idx_dev == 11 {
-        // h
-        Some(Tolerance::from_limits(0.0, -flt(tol)))
-    } else if idx_dev == 12 {
-        // js
-        Some(Tolerance::from_limits(flt(tol / 2), -flt(tol / 2)))
-    } else if idx_dev == 13 && idx_grade > 6 && idx_grade < 11 {
-        // j
-        let idx_size = LOWER_J.iter().position(|&s| s[0] >= size)?;
-        let dev = -rtv(*LOWER_J[idx_size].get(idx_grade.max(8) - 7)?)?;
-        Some(Tolerance::from_limits(flt(dev + tol), flt(dev)))
-    } else if idx_dev == 14 {
-        // k
-        let idx_size = DEVIATIONS_K_ZC.iter().position(|&s| s[0] >= size)?;
-        let dev = if idx_grade > 5 && idx_grade < 10 {
-            rtv(*DEVIATIONS_K_ZC[idx_size].get(idx_dev - 13)?)?
-        } else {
-            0
-        };
-        Some(Tolerance::from_limits(flt(dev + tol), flt(dev)))
-    } else if (15..28).contains(&idx_dev) {
-        // m to zc
-        let idx_size = DEVIATIONS_K_ZC.iter().position(|&s| s[0] >= size)?;
-        let dev = rtv(*DEVIATIONS_K_ZC[idx_size].get(idx_dev - 13)?)?;
-        Some(Tolerance::from_limits(flt(dev + tol), flt(dev)))
-    } else {
-        None
+        "h" => Some(Tolerance::from_int(0, -tol)),
+        "js" => Some(Tolerance::from_int(tol / 2, -(tol / 2))),
+        "j" if idx_grade > 6 && idx_grade < 11 => {
+            let row = LOWER_J.iter().position(|&s| s[0] >= size)?;
+            let dev = -um_to_nm(*LOWER_J[row].get(idx_grade.max(8) - 7)?)?;
+            Some(Tolerance::from_int(dev + tol, dev))
+        }
+        "k" => {
+            let row = DEVIATIONS_K_ZC.iter().position(|&s| s[0] >= size)?;
+            let dev = if idx_grade > 5 && idx_grade < 10 {
+                um_to_nm(*DEVIATIONS_K_ZC[row].get(col - 13)?)?
+            } else {
+                0
+            };
+            Some(Tolerance::from_int(dev + tol, dev))
+        }
+        "m" | "n" | "p" | "r" | "s" | "t" | "u" | "v" | "x" | "y" | "z" | "za" | "zb" | "zc" => {
+            let row = DEVIATIONS_K_ZC.iter().position(|&s| s[0] >= size)?;
+            let dev = um_to_nm(*DEVIATIONS_K_ZC[row].get(col - 13)?)?;
+            Some(Tolerance::from_int(dev + tol, dev))
+        }
+        _ => None,
     }
 }
 

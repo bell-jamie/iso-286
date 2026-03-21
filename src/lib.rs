@@ -1,6 +1,6 @@
 //! # iso-286
 //!
-//! A library for navigating ISO 286-1:2010 tables
+//! {{ env!("CARGO_PKG_DESCRIPTION") }}
 //!
 //! Originally written for a calculator on [Engineering Tools](https://bell-jamie.github.io/)
 //!
@@ -23,5 +23,6 @@
 
 mod lookup;
 mod tables;
+mod wasm;
 
-pub use lookup::{grades, hole_deviations, limits, shaft_deviations, Error, Tolerance};
+pub use lookup::{Error, Tolerance, grades, hole_deviations, limits, shaft_deviations};

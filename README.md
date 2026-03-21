@@ -1,2 +1,2 @@
 # iso-286
-ISO 286-2010 limits and fits calculations
+A library for navigating ISO 286-1:2010 grade and limit deviation tables
