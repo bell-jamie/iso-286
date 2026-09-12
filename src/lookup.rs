@@ -1,6 +1,6 @@
 use super::tables::{
-    DELTA, DEVIATION_MAP, DEVIATIONS_A_G, DEVIATIONS_K_ZC, GRADE_MAP, LOWER_J,
-    STANDARD_TOLERANCE_GRADES, UPPER_J,
+    DELTA, DEVIATION_MAP, DEVIATIONS_A_G, DEVIATIONS_K_ZC, GRADE_MAP, HOLE_PREFERRED, LOWER_J,
+    SHAFT_PREFERRED, STANDARD_TOLERANCE_GRADES, UPPER_J,
 };
 use wasm_bindgen::prelude::*;
 
@@ -32,12 +32,15 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::InvalidToleranceClass(s) => write!(f, "invalid tolerance class: {s:?}"),
-            Error::SizeOutOfRange(s) => write!(f, "nominal size {s} mm is out of range"),
+            Error::InvalidToleranceClass(s) => write!(f, "Invalid tolerance class: {s:?}"),
+            Error::SizeOutOfRange(s) => write!(f, "Nominal size {s} mm is out of range (0 < 3150)"),
             Error::UnsupportedCombination {
                 tolerance_class,
                 size,
-            } => write!(f, "unsupported combination: {tolerance_class} at {size} mm"),
+            } => write!(
+                f,
+                "Combination not supported by ISO 286: {size} {tolerance_class}"
+            ),
         }
     }
 }
@@ -58,8 +61,8 @@ fn parse_tolerance_class(tolerance_class: &str) -> Result<(&str, &str), Error> {
 }
 
 /// Available IT grade designations.
-pub fn grades() -> &'static [&'static str] {
-    GRADE_MAP.as_slice()
+pub fn grades() -> Vec<String> {
+    GRADE_MAP.iter().map(|d| d.to_string()).collect()
 }
 
 /// Available hole deviation letters (uppercase).
@@ -68,8 +71,58 @@ pub fn hole_deviations() -> Vec<String> {
 }
 
 /// Available shaft deviation letters (lowercase).
-pub fn shaft_deviations() -> &'static [&'static str] {
-    DEVIATION_MAP.as_slice()
+pub fn shaft_deviations() -> Vec<String> {
+    DEVIATION_MAP.iter().map(|d| d.to_string()).collect()
+}
+
+/// Preferred hole tolerance classses
+pub fn hole_preferred_tolerances() -> Vec<String> {
+    HOLE_PREFERRED.iter().map(|t| t.to_string()).collect()
+}
+
+/// Preferred shaft tolerance classes
+pub fn shaft_preferred_tolerances() -> Vec<String> {
+    SHAFT_PREFERRED.iter().map(|t| t.to_string()).collect()
+}
+
+/// List the closest preferred tolerances in order of suitability
+pub fn list_preferred(size: f64, tolerance_class: &str) -> Result<Vec<String>, Error> {
+    let (dev, _) = parse_tolerance_class(tolerance_class)?;
+    let hole = dev.chars().next().unwrap().is_uppercase(); // unwraps because parsed ok
+    let preferred = if hole {
+        hole_preferred_tolerances()
+    } else {
+        shaft_preferred_tolerances()
+    };
+
+    let target = limits(size, tolerance_class)?;
+    let mut preferred_errors = preferred
+        .iter()
+        .filter_map(|pc| {
+            let t = limits(size, pc).ok()?;
+            let error = (target.upper - t.upper).abs()
+                + (target.middle - t.middle).abs()
+                + (target.lower - t.lower).abs();
+            Some((pc.clone(), error))
+        })
+        .collect::<Vec<(String, f64)>>();
+    preferred_errors.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+    // Size may not map to a preferred tolerance class
+    if preferred_errors.is_empty() {
+        return Err(Error::UnsupportedCombination {
+            tolerance_class: tolerance_class.to_owned(),
+            size,
+        });
+    }
+
+    Ok(preferred_errors.into_iter().map(|(p, _)| p).collect())
+}
+
+/// Find the closest preferred tolerance
+pub fn find_preferred(size: f64, tolerance_class: &str) -> Result<String, Error> {
+    let list = list_preferred(size, tolerance_class)?;
+    Ok(list[0].clone())
 }
 
 /// Compute ISO 286 tolerance limits for a given nominal size and tolerance class.
@@ -79,6 +132,10 @@ pub fn shaft_deviations() -> &'static [&'static str] {
 ///
 /// Returns upper and lower deviations in millimetres.
 pub fn limits(size: f64, tolerance_class: &str) -> Result<Tolerance, Error> {
+    if !size.is_finite() || size <= 0.0 {
+        return Err(Error::SizeOutOfRange(size));
+    }
+
     let (deviation, grade) = parse_tolerance_class(tolerance_class)?;
     let hole = deviation.chars().next().unwrap().is_uppercase();
     let int_size = size.ceil() as i32;

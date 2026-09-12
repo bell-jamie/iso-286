@@ -1,4 +1,7 @@
-use iso_286::{grades, hole_deviations, limits, shaft_deviations};
+use iso_286::{
+    find_preferred, grades, hole_deviations, hole_preferred_tolerances, limits, list_preferred,
+    shaft_deviations, shaft_preferred_tolerances,
+};
 
 // -- Spot checks across deviation groups --
 
@@ -142,7 +145,9 @@ fn ordering_invariant() {
 #[test]
 fn js_symmetry() {
     let sizes = [3.0, 10.0, 30.0, 50.0, 120.0, 250.0, 500.0];
-    let js_grades = ["JS4", "JS5", "JS6", "JS7", "JS8", "js4", "js5", "js6", "js7", "js8"];
+    let js_grades = [
+        "JS4", "JS5", "JS6", "JS7", "JS8", "js4", "js5", "js6", "js7", "js8",
+    ];
 
     for size in sizes {
         for tc in js_grades {
@@ -229,6 +234,24 @@ fn size_out_of_range() {
 }
 
 #[test]
+fn non_positive_or_non_finite_size_rejected() {
+    for size in [0.0, -5.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(
+            limits(size, "H7").is_err(),
+            "size {size} should be rejected"
+        );
+        assert!(
+            find_preferred(size, "H7").is_err(),
+            "size {size} should be rejected by find_preferred"
+        );
+        assert!(
+            list_preferred(size, "H7").is_err(),
+            "size {size} should be rejected by list_preferred"
+        );
+    }
+}
+
+#[test]
 fn unsupported_combinations_above_500() {
     // IT01 and IT0 are not available above 500mm
     assert!(limits(600.0, "H01").is_err());
@@ -251,7 +274,11 @@ fn hole_deviations_uppercase() {
     let h = hole_deviations();
     assert_eq!(h.len(), 28);
     for d in &h {
-        assert_eq!(*d, d.to_uppercase(), "hole deviation {d} should be uppercase");
+        assert_eq!(
+            *d,
+            d.to_uppercase(),
+            "hole deviation {d} should be uppercase"
+        );
     }
     assert_eq!(h[0], "A");
     assert_eq!(h[27], "ZC");
@@ -261,8 +288,12 @@ fn hole_deviations_uppercase() {
 fn shaft_deviations_lowercase() {
     let s = shaft_deviations();
     assert_eq!(s.len(), 28);
-    for d in s {
-        assert_eq!(*d, d.to_lowercase(), "shaft deviation {d} should be lowercase");
+    for d in &s {
+        assert_eq!(
+            *d,
+            d.to_lowercase(),
+            "shaft deviation {d} should be lowercase"
+        );
     }
     assert_eq!(s[0], "a");
     assert_eq!(s[27], "zc");
@@ -296,4 +327,193 @@ fn all_shaft_deviations_resolve() {
             result.err()
         );
     }
+}
+
+// -- list_preferred / find_preferred --
+
+// Recompute the same "sum of absolute deviation differences" error that
+// list_preferred/find_preferred use internally, so tests can check ordering
+// without depending on their private implementation.
+fn preferred_error(size: f64, tolerance_class: &str, preferred_class: &str) -> f64 {
+    let target = limits(size, tolerance_class).unwrap();
+    let candidate = limits(size, preferred_class).unwrap();
+    (target.upper - candidate.upper).abs()
+        + (target.middle - candidate.middle).abs()
+        + (target.lower - candidate.lower).abs()
+}
+
+#[test]
+fn find_preferred_returns_head_of_list_preferred() {
+    let cases = [
+        ("H6", 10.0),
+        ("G6", 30.0),
+        ("K6", 30.0),
+        ("M6", 80.0),
+        ("h5", 30.0),
+        ("f6", 30.0),
+        ("n7", 80.0),
+        ("M7", 638.0),
+    ];
+    for (tc, size) in cases {
+        let list = list_preferred(size, tc).unwrap();
+        let found = find_preferred(size, tc).unwrap();
+        assert_eq!(
+            found, list[0],
+            "find_preferred({tc}, {size}) should equal list_preferred's first entry"
+        );
+    }
+}
+
+#[test]
+fn list_preferred_is_sorted_ascending_by_error() {
+    let cases = [
+        ("H6", 10.0),
+        ("K6", 30.0),
+        ("M6", 80.0),
+        ("n7", 80.0),
+        ("M7", 638.0),
+    ];
+    for (tc, size) in cases {
+        let list = list_preferred(size, tc).unwrap();
+        let errors: Vec<f64> = list
+            .iter()
+            .map(|pc| preferred_error(size, tc, pc))
+            .collect();
+        for w in errors.windows(2) {
+            assert!(
+                w[0] <= w[1],
+                "{tc} @ {size}: list_preferred not sorted ascending: {list:?} -> {errors:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn list_preferred_only_contains_valid_candidates_for_size() {
+    // At 638mm several small-size-only preferred classes (e.g. A11) become
+    // unsupported; list_preferred must omit them rather than propagate an
+    // error or include a class that limits() itself rejects.
+    let list = list_preferred(638.0, "M7").unwrap();
+    assert!(
+        !list.contains(&"A11".to_string()),
+        "A11 is unsupported at 638mm and should be excluded, got {list:?}"
+    );
+    for pc in &list {
+        assert!(
+            limits(638.0, pc).is_ok(),
+            "{pc} in list_preferred(638.0, \"M7\") should itself resolve via limits()"
+        );
+    }
+}
+
+#[test]
+fn preferred_class_maps_to_itself() {
+    // Every preferred class, evaluated at a size where it's valid, should
+    // be its own closest match (error 0, so it should sort first).
+    let sizes = [3.0, 10.0, 30.0, 80.0, 180.0, 400.0];
+    for tc in hole_preferred_tolerances() {
+        for &size in &sizes {
+            if limits(size, &tc).is_ok() {
+                assert_eq!(
+                    find_preferred(size, &tc).unwrap(),
+                    tc,
+                    "hole {tc} @ {size} should map to itself"
+                );
+                assert_eq!(
+                    list_preferred(size, &tc).unwrap()[0],
+                    tc,
+                    "hole {tc} @ {size} should be its own first choice"
+                );
+            }
+        }
+    }
+    for tc in shaft_preferred_tolerances() {
+        for &size in &sizes {
+            if limits(size, &tc).is_ok() {
+                assert_eq!(
+                    find_preferred(size, &tc).unwrap(),
+                    tc,
+                    "shaft {tc} @ {size} should map to itself"
+                );
+                assert_eq!(
+                    list_preferred(size, &tc).unwrap()[0],
+                    tc,
+                    "shaft {tc} @ {size} should be its own first choice"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn hole_class_maps_to_hole_preferred() {
+    let hole_preferred = hole_preferred_tolerances();
+    for tc in ["H6", "G6", "K6", "M6", "R6", "ZC7"] {
+        let result = find_preferred(30.0, tc).unwrap();
+        assert!(
+            hole_preferred.contains(&result),
+            "{tc} should map to a preferred hole class, got {result}"
+        );
+
+        let list = list_preferred(30.0, tc).unwrap();
+        assert!(
+            list.iter().all(|pc| hole_preferred.contains(pc)),
+            "{tc}: list_preferred should only contain preferred hole classes, got {list:?}"
+        );
+    }
+}
+
+#[test]
+fn shaft_class_maps_to_shaft_preferred() {
+    let shaft_preferred = shaft_preferred_tolerances();
+    for tc in ["h5", "f6", "m5", "n7", "u6"] {
+        let result = find_preferred(30.0, tc).unwrap();
+        assert!(
+            shaft_preferred.contains(&result),
+            "{tc} should map to a preferred shaft class, got {result}"
+        );
+
+        let list = list_preferred(30.0, tc).unwrap();
+        assert!(
+            list.iter().all(|pc| shaft_preferred.contains(pc)),
+            "{tc}: list_preferred should only contain preferred shaft classes, got {list:?}"
+        );
+    }
+}
+
+#[test]
+fn find_preferred_invalid_tolerance_class() {
+    assert!(find_preferred(10.0, "X99").is_err());
+    assert!(find_preferred(10.0, "").is_err());
+}
+
+#[test]
+fn list_preferred_invalid_tolerance_class() {
+    assert!(list_preferred(10.0, "X99").is_err());
+    assert!(list_preferred(10.0, "").is_err());
+}
+
+#[test]
+fn find_preferred_size_out_of_range() {
+    assert!(find_preferred(4000.0, "H7").is_err());
+}
+
+#[test]
+fn list_preferred_size_out_of_range() {
+    assert!(list_preferred(4000.0, "H7").is_err());
+}
+
+#[test]
+fn find_preferred_skips_unsupported_candidates() {
+    // At 638mm, the "A11" preferred candidate is unsupported (out of range
+    // for that grade), but find_preferred should still return the best
+    // among the candidates that *are* valid, not bail out entirely.
+    assert_eq!(find_preferred(638.0, "M7").unwrap(), "N7");
+}
+
+#[test]
+fn find_preferred_close_call_h6_vs_h7() {
+    // H6 at 10mm (0/+0.009) is closer to preferred H7 (0/+0.015) than to
+    // any other preferred hole class.
+    assert_eq!(find_preferred(10.0, "H6").unwrap(), "H7");
 }

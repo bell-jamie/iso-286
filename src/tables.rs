@@ -24,6 +24,16 @@ pub const DEVIATION_MAP: &[&str; 28] = &[
     "s", "t", "u", "v", "x", "y", "z", "za", "zb", "zc",
 ];
 
+pub const HOLE_PREFERRED: &[&str; 17] = &[
+    "A11", "B11", "C11", "D10", "E9", "F8", "G7", "H7", "H8", "H9", "H11", "JS7", "K7", "N7", "P7",
+    "R7", "S7",
+];
+
+pub const SHAFT_PREFERRED: &[&str; 17] = &[
+    "a11", "b11", "c11", "d9", "e8", "f7", "g6", "h6", "h7", "h9", "h11", "js6", "k6", "n6", "p6",
+    "r6", "s6",
+];
+
 pub const STANDARD_TOLERANCE_GRADES: &[[i32; 21]; 21] = &[
     [
         3, 3, 5, 8, 12, 20, 30, 40, 60, 100, 140, 250, 400, 600, 1_000, 1_400, 2_500, 4_000, 6_000,
