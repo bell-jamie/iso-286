@@ -1,0 +1,61 @@
+name: Build and publish WASM package
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
+      - name: Build wasm package
+        run: wasm-pack build --release --target bundler --out-dir pkg
+
+      - name: Determine next package version
+        id: version
+        run: |
+          if git fetch origin build 2>/dev/null && git show FETCH_HEAD:package.json > /tmp/prev.json 2>/dev/null; then
+            PREV=$(node -p "require('/tmp/prev.json').version")
+          else
+            PREV="0.0.0"
+          fi
+          NEXT=$(node -e "
+            const [maj, min, pat] = '$PREV'.split('.').map(Number);
+            console.log(\`\${maj}.\${min}.\${pat + 1}\`);
+          ")
+          echo "Previous version: $PREV -> next version: $NEXT"
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
+
+      - name: Set package version
+        run: npm --prefix pkg version ${{ steps.version.outputs.next }} --no-git-tag-version --allow-same-version
+
+      - name: Publish build output to build branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./pkg
+          publish_branch: build
+          force_orphan: true
+          user_name: "github-actions[bot]"
+          user_email: "github-actions[bot]@users.noreply.github.com"
+          commit_message: "Build v${{ steps.version.outputs.next }} from ${{ github.sha }}"
