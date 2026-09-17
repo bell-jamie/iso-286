@@ -1,6 +1,6 @@
 use iso_286::{
-    find_preferred, grades, hole_deviations, hole_preferred_tolerances, limits, list_preferred,
-    shaft_deviations, shaft_preferred_tolerances,
+    Error, Feature, Match, find_preferred, grades, hole_deviations, hole_preferred_tolerances,
+    limits, list_closest, list_preferred, shaft_deviations, shaft_preferred_tolerances,
 };
 
 // -- Spot checks across deviation groups --
@@ -338,8 +338,8 @@ fn preferred_error(size: f64, tolerance_class: &str, preferred_class: &str) -> f
     let target = limits(size, tolerance_class).unwrap();
     let candidate = limits(size, preferred_class).unwrap();
     (target.upper - candidate.upper).abs()
-        + (target.middle - candidate.middle).abs()
         + (target.lower - candidate.lower).abs()
+        + ((target.upper + target.lower) / 2.0 - (candidate.upper + candidate.lower) / 2.0).abs()
 }
 
 #[test]
@@ -361,6 +361,8 @@ fn find_preferred_returns_head_of_list_preferred() {
             found, list[0],
             "find_preferred({tc}, {size}) should equal list_preferred's first entry"
         );
+        assert_eq!(found.size, size);
+        assert_eq!(found.tolerance(), limits(size, &found.class).unwrap());
     }
 }
 
@@ -377,7 +379,7 @@ fn list_preferred_is_sorted_ascending_by_error() {
         let list = list_preferred(size, tc).unwrap();
         let errors: Vec<f64> = list
             .iter()
-            .map(|pc| preferred_error(size, tc, pc))
+            .map(|m| preferred_error(size, tc, &m.class))
             .collect();
         for w in errors.windows(2) {
             assert!(
@@ -395,13 +397,14 @@ fn list_preferred_only_contains_valid_candidates_for_size() {
     // error or include a class that limits() itself rejects.
     let list = list_preferred(638.0, "M7").unwrap();
     assert!(
-        !list.contains(&"A11".to_string()),
+        !list.iter().any(|m| m.class == "A11"),
         "A11 is unsupported at 638mm and should be excluded, got {list:?}"
     );
-    for pc in &list {
+    for m in &list {
         assert!(
-            limits(638.0, pc).is_ok(),
-            "{pc} in list_preferred(638.0, \"M7\") should itself resolve via limits()"
+            limits(638.0, &m.class).is_ok(),
+            "{} in list_preferred(638.0, \"M7\") should itself resolve via limits()",
+            m.class
         );
     }
 }
@@ -415,12 +418,12 @@ fn preferred_class_maps_to_itself() {
         for &size in &sizes {
             if limits(size, &tc).is_ok() {
                 assert_eq!(
-                    find_preferred(size, &tc).unwrap(),
+                    find_preferred(size, &tc).unwrap().class,
                     tc,
                     "hole {tc} @ {size} should map to itself"
                 );
                 assert_eq!(
-                    list_preferred(size, &tc).unwrap()[0],
+                    list_preferred(size, &tc).unwrap()[0].class,
                     tc,
                     "hole {tc} @ {size} should be its own first choice"
                 );
@@ -431,12 +434,12 @@ fn preferred_class_maps_to_itself() {
         for &size in &sizes {
             if limits(size, &tc).is_ok() {
                 assert_eq!(
-                    find_preferred(size, &tc).unwrap(),
+                    find_preferred(size, &tc).unwrap().class,
                     tc,
                     "shaft {tc} @ {size} should map to itself"
                 );
                 assert_eq!(
-                    list_preferred(size, &tc).unwrap()[0],
+                    list_preferred(size, &tc).unwrap()[0].class,
                     tc,
                     "shaft {tc} @ {size} should be its own first choice"
                 );
@@ -451,13 +454,14 @@ fn hole_class_maps_to_hole_preferred() {
     for tc in ["H6", "G6", "K6", "M6", "R6", "ZC7"] {
         let result = find_preferred(30.0, tc).unwrap();
         assert!(
-            hole_preferred.contains(&result),
-            "{tc} should map to a preferred hole class, got {result}"
+            hole_preferred.contains(&result.class),
+            "{tc} should map to a preferred hole class, got {}",
+            result.class
         );
 
         let list = list_preferred(30.0, tc).unwrap();
         assert!(
-            list.iter().all(|pc| hole_preferred.contains(pc)),
+            list.iter().all(|m| hole_preferred.contains(&m.class)),
             "{tc}: list_preferred should only contain preferred hole classes, got {list:?}"
         );
     }
@@ -469,13 +473,14 @@ fn shaft_class_maps_to_shaft_preferred() {
     for tc in ["h5", "f6", "m5", "n7", "u6"] {
         let result = find_preferred(30.0, tc).unwrap();
         assert!(
-            shaft_preferred.contains(&result),
-            "{tc} should map to a preferred shaft class, got {result}"
+            shaft_preferred.contains(&result.class),
+            "{tc} should map to a preferred shaft class, got {}",
+            result.class
         );
 
         let list = list_preferred(30.0, tc).unwrap();
         assert!(
-            list.iter().all(|pc| shaft_preferred.contains(pc)),
+            list.iter().all(|m| shaft_preferred.contains(&m.class)),
             "{tc}: list_preferred should only contain preferred shaft classes, got {list:?}"
         );
     }
@@ -508,12 +513,352 @@ fn find_preferred_skips_unsupported_candidates() {
     // At 638mm, the "A11" preferred candidate is unsupported (out of range
     // for that grade), but find_preferred should still return the best
     // among the candidates that *are* valid, not bail out entirely.
-    assert_eq!(find_preferred(638.0, "M7").unwrap(), "N7");
+    assert_eq!(find_preferred(638.0, "M7").unwrap().class, "N7");
 }
 
 #[test]
 fn find_preferred_close_call_h6_vs_h7() {
     // H6 at 10mm (0/+0.009) is closer to preferred H7 (0/+0.015) than to
     // any other preferred hole class.
-    assert_eq!(find_preferred(10.0, "H6").unwrap(), "H7");
+    assert_eq!(find_preferred(10.0, "H6").unwrap().class, "H7");
+}
+
+// -- list_closest, strict --
+
+// Mirrors the metric list_closest ranks on, so tests can check the ordering from outside.
+fn error(size: f64, class: &str, upper: f64, lower: f64) -> f64 {
+    let t = limits(size, class).unwrap();
+    (t.upper - upper).abs()
+        + (t.lower - lower).abs()
+        + ((t.upper + t.lower) / 2.0 - (upper + lower) / 2.0).abs()
+}
+
+#[test]
+fn strict_finds_an_exact_match() {
+    // H7 at 10 mm is exactly +0.015 / 0, so it has to come first.
+    let found = list_closest(10.0, 0.015, 0.0, Feature::Hole, true, 3, 1).unwrap();
+    assert_eq!(found[0].size, 10.0);
+    assert_eq!(found[0].class, "H7");
+    assert_eq!(found[0].error, 0.0);
+    assert_eq!(found[0].tolerance(), limits(10.0, "H7").unwrap());
+    assert_eq!(found.len(), 3);
+}
+
+#[test]
+fn strict_leaves_the_nominal_size_alone() {
+    let size = 10.4;
+    for found in list_closest(size, 0.02, -0.01, Feature::Hole, true, 10, 1).unwrap() {
+        assert_eq!(found.size, size);
+    }
+}
+
+#[test]
+fn strict_is_ordered_by_ascending_error() {
+    let (size, upper, lower) = (52.8, 0.03, -0.012);
+    let found = list_closest(size, upper, lower, Feature::Hole, true, 20, 1).unwrap();
+    let errors: Vec<f64> = found
+        .iter()
+        .map(|m| error(size, &m.class, upper, lower))
+        .collect();
+    // Recomputing in millimetres reintroduces the float noise the library avoids by
+    // ranking in integer nanometres, so allow a slack of well under one nanometre.
+    assert!(errors.windows(2).all(|w| w[0] <= w[1] + 1e-9), "{errors:?}");
+}
+
+#[test]
+fn strict_returns_the_global_best() {
+    // The head of a one result search must beat every class the tables can produce.
+    let (size, upper, lower) = (85.0, 0.041, 0.002);
+    let found = list_closest(size, upper, lower, Feature::Hole, true, 1, 1).unwrap();
+    let best = error(size, &found[0].class, upper, lower);
+
+    for deviation in hole_deviations() {
+        for grade in grades() {
+            let class = format!("{deviation}{grade}");
+            if limits(size, &class).is_ok() {
+                assert!(
+                    error(size, &class, upper, lower) >= best,
+                    "{class} beats {}",
+                    found[0].class
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn tolerance_limits_may_be_supplied_either_way_round() {
+    let ordered = list_closest(10.0, 0.015, 0.0, Feature::Hole, true, 5, 1).unwrap();
+    let swapped = list_closest(10.0, 0.0, 0.015, Feature::Hole, true, 5, 1).unwrap();
+    assert_eq!(ordered, swapped);
+}
+
+#[test]
+fn results_are_capped_not_padded() {
+    assert!(
+        list_closest(10.0, 0.015, 0.0, Feature::Hole, true, 0, 1)
+            .unwrap()
+            .is_empty()
+    );
+    // Far more than the tables can supply for one size.
+    let all = list_closest(1.0, 0.01, 0.0, Feature::Hole, true, 5_000, 1).unwrap();
+    assert!(!all.is_empty() && all.len() < 5_000);
+}
+
+#[test]
+fn list_closest_rejects_bad_arguments() {
+    assert!(matches!(
+        list_closest(0.0, 0.015, 0.0, Feature::Hole, true, 3, 1),
+        Err(Error::SizeOutOfRange(_))
+    ));
+    assert!(matches!(
+        list_closest(4000.0, 0.015, 0.0, Feature::Hole, true, 3, 1),
+        Err(Error::SizeOutOfRange(_))
+    ));
+    assert!(matches!(
+        list_closest(10.0, f64::NAN, 0.0, Feature::Hole, true, 3, 1),
+        Err(Error::InvalidTolerance { .. })
+    ));
+    assert!(matches!(
+        list_closest(10.0, 0.015, 0.0, Feature::Hole, true, 3, 7),
+        Err(Error::InvalidPrecision(7))
+    ));
+}
+
+// -- list_closest, free nominal size --
+
+#[test]
+fn free_search_may_move_the_nominal_size_onto_an_exact_match() {
+    // 10 h7 is 10.000/9.985. Asking for those two limits as a hole, every IT7 class
+    // whose lower deviation keeps the nominal inside the same bracket can hit them
+    // exactly, but only by shifting the nominal size off 10 mm.
+    let target = (10.0, 9.985);
+    let found = list_closest(10.0, 0.0, -0.015, Feature::Hole, false, 4, 3).unwrap();
+
+    for m in &found {
+        assert!(
+            absolute_error(m.size, &m.class, target) < 1e-9,
+            "{} {} is not an exact fit, in {found:?}",
+            m.size,
+            m.class
+        );
+    }
+    assert!(
+        found.iter().any(|m| m.size == 9.985 && m.class == "H7"),
+        "expected 9.985 H7 among {found:?}"
+    );
+    assert!(
+        found.iter().any(|m| m.size != 10.0),
+        "nothing moved off the supplied size in {found:?}"
+    );
+}
+
+#[test]
+fn free_search_holds_the_wanted_precision() {
+    for decimals in 0..=3 {
+        let step = 10f64.powi(decimals as i32);
+        for m in list_closest(10.37, 0.02, -0.01, Feature::Shaft, false, 25, decimals).unwrap() {
+            assert!(
+                ((m.size * step).round() / step - m.size).abs() < 1e-9,
+                "{} {} is finer than {decimals} decimals",
+                m.size,
+                m.class
+            );
+        }
+    }
+}
+
+// The same metric again, but against the absolute limits of the feature, which is what
+// the free search compares since a candidate may sit on a different nominal size.
+fn absolute_error(found: f64, class: &str, target: (f64, f64)) -> f64 {
+    let t = limits(found, class).unwrap();
+    let (upper, lower) = (found + t.upper, found + t.lower);
+    (upper - target.0).abs()
+        + (lower - target.1).abs()
+        + ((upper + lower) / 2.0 - (target.0 + target.1) / 2.0).abs()
+}
+
+#[test]
+fn free_search_is_never_worse_than_strict() {
+    // Only where the supplied size is already on the grid `decimals` asks for. Strict
+    // holds the size whatever its precision, so otherwise it can reach a nominal size
+    // the free search is not allowed to name.
+    let cases = [
+        (10.0, 0.015, 0.0, 1),
+        (10.37, 0.02, -0.01, 2),
+        (52.8, 0.03, -0.012, 1),
+        (0.6, 0.004, -0.004, 1),
+        (2750.0, 0.4, 0.1, 1),
+    ];
+    for (size, upper, lower, decimals) in cases {
+        let target = (size + upper, size + lower);
+        let strict = list_closest(size, upper, lower, Feature::Hole, true, 1, decimals).unwrap();
+        let free = list_closest(size, upper, lower, Feature::Hole, false, 1, decimals).unwrap();
+
+        let strict_error = absolute_error(strict[0].size, &strict[0].class, target);
+        let free_error = absolute_error(free[0].size, &free[0].class, target);
+        assert!(
+            free_error <= strict_error + 1e-9,
+            "{size} {upper}/{lower}: free {free:?} ({free_error}) lost to strict \
+             {strict:?} ({strict_error})"
+        );
+    }
+}
+
+#[test]
+fn every_result_is_a_class_that_applies_at_the_size_returned() {
+    // Also pins the bracket table: a candidate is scored at its bracket's upper bound,
+    // so a nominal size elsewhere in that bracket has to resolve the same way.
+    let cases = [
+        (10.0, 0.015, 0.0, 3),
+        (10.37, 0.02, -0.01, 1),
+        (0.6, 0.004, -0.004, 2),
+        (137.5, 0.05, -0.05, 0),
+        (2750.0, 0.4, 0.1, 1),
+    ];
+    for (size, upper, lower, decimals) in cases {
+        for (feature, strict) in [
+            (Feature::Hole, true),
+            (Feature::Hole, false),
+            (Feature::Shaft, true),
+            (Feature::Shaft, false),
+        ] {
+            for m in list_closest(size, upper, lower, feature, strict, 200, decimals).unwrap() {
+                assert!(m.size > 0.0 && m.size <= 3150.0, "{} out of range", m.size);
+                assert!(
+                    limits(m.size, &m.class).is_ok(),
+                    "{} does not apply at {}",
+                    m.class,
+                    m.size
+                );
+            }
+        }
+    }
+}
+
+// -- list_closest, width mismatch bound --
+
+#[test]
+fn the_bound_does_not_change_the_ranking() {
+    // A shorter list prunes harder, so it has to stay a prefix of a longer one.
+    for (feature, strict) in [
+        (Feature::Hole, true),
+        (Feature::Hole, false),
+        (Feature::Shaft, true),
+        (Feature::Shaft, false),
+    ] {
+        let long = list_closest(10.37, 0.021, 0.003, feature, strict, 40, 2).unwrap();
+        for n in 1..=40 {
+            let short = list_closest(10.37, 0.021, 0.003, feature, strict, n, 2).unwrap();
+            assert_eq!(
+                short.as_slice(),
+                &long[..n.min(long.len())],
+                "{feature:?} strict = {strict}, results = {n}"
+            );
+        }
+    }
+}
+
+#[test]
+fn free_search_beats_every_class_near_the_size() {
+    // Exhaustive over a 4 mm window of the size grid, which is far wider than any
+    // worthwhile answer: moving the nominal a whole millimetre costs a thousand times
+    // the tolerance being matched.
+    let (size, upper, lower, decimals) = (10.37, 0.021, 0.003, 2);
+    let target = (size + upper, size + lower);
+    let found = list_closest(size, upper, lower, Feature::Hole, false, 1, decimals).unwrap();
+    let best = absolute_error(found[0].size, &found[0].class, target);
+
+    let step = 10f64.powi(decimals as i32);
+    for offset in -200..=200 {
+        let nominal = ((size * step).round() + f64::from(offset)) / step;
+        for deviation in hole_deviations() {
+            for grade in grades() {
+                let class = format!("{deviation}{grade}");
+                if limits(nominal, &class).is_ok() {
+                    assert!(
+                        absolute_error(nominal, &class, target) >= best - 1e-9,
+                        "{nominal} {class} beats {found:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+// -- list_closest, the reported tolerance and error --
+
+#[test]
+fn the_reported_tolerance_is_the_one_the_class_gives() {
+    let cases = [
+        (10.0, 0.015, 0.0, 1, true),
+        (10.37, 0.021, 0.003, 2, false),
+        (137.5, 0.05, -0.05, 0, false),
+        (0.6, 0.004, -0.004, 3, false),
+    ];
+    for (size, upper, lower, decimals, strict) in cases {
+        for feature in [Feature::Hole, Feature::Shaft] {
+            for m in list_closest(size, upper, lower, feature, strict, 20, decimals).unwrap() {
+                assert_eq!(
+                    m.tolerance(),
+                    limits(m.size, &m.class).unwrap(),
+                    "{} {} reported the wrong deviations",
+                    m.size,
+                    m.class
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_reported_error_is_the_distance_from_the_wanted_tolerance() {
+    let (size, upper, lower) = (10.37, 0.021, 0.003);
+    let target = (size + upper, size + lower);
+    for feature in [Feature::Hole, Feature::Shaft] {
+        for m in list_closest(size, upper, lower, feature, false, 20, 2).unwrap() {
+            let expected = absolute_error(m.size, &m.class, target);
+            assert!(
+                (m.error - expected).abs() < 1e-9,
+                "{} {}: reported {} but recomputed {expected}",
+                m.size,
+                m.class,
+                m.error
+            );
+        }
+    }
+}
+
+#[test]
+fn an_exact_match_reports_zero_error() {
+    let found: Vec<Match> = list_closest(10.0, 0.0, -0.015, Feature::Hole, false, 4, 3).unwrap();
+    for m in &found {
+        assert_eq!(m.error, 0.0, "{} {} should be exact", m.size, m.class);
+    }
+}
+
+#[test]
+fn preferred_reports_its_distance_from_the_wanted_class() {
+    for (tc, size) in [("H6", 10.0), ("K6", 30.0), ("n7", 80.0), ("M7", 638.0)] {
+        for m in list_preferred(size, tc).unwrap() {
+            assert_eq!(
+                m.size, size,
+                "list_preferred must not move the nominal size"
+            );
+            assert_eq!(m.tolerance(), limits(size, &m.class).unwrap());
+            let expected = preferred_error(size, tc, &m.class);
+            assert!(
+                (m.error - expected).abs() < 1e-9,
+                "{} reported {} but recomputed {expected}",
+                m.class,
+                m.error
+            );
+        }
+    }
+}
+
+#[test]
+fn a_preferred_class_is_its_own_zero_error_match() {
+    assert_eq!(find_preferred(10.0, "H7").unwrap().error, 0.0);
+    assert_eq!(find_preferred(30.0, "g6").unwrap().error, 0.0);
 }

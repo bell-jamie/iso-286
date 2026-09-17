@@ -26,6 +26,7 @@ mod tables;
 mod wasm;
 
 pub use lookup::{
-    Error, Tolerance, find_preferred, grades, hole_deviations, hole_preferred_tolerances,
-    limits, list_preferred, shaft_deviations, shaft_preferred_tolerances,
+    Error, Feature, Match, Tolerance, find_preferred, grades, hole_deviations,
+    hole_preferred_tolerances, limits, list_closest, list_preferred, shaft_deviations,
+    shaft_preferred_tolerances,
 };
